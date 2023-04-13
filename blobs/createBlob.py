@@ -1,44 +1,15 @@
 import json
 import boto3
-import logging
+import os
 import re
 from botocore.exceptions import ClientError
 from datetime import datetime
-from uuid import uuid4
+from uuid import uuid1
+
+dynamodb = boto3.resource('dynamodb')
 
 
-def create_presigned_post(bucket_name, object_name,
-                          fields=None, conditions=None, expiration=3600):
-    """Generate a presigned URL S3 POST request to upload a file
-
-    :param bucket_name: string
-    :param object_name: string
-    :param fields: Dictionary of prefilled form fields
-    :param conditions: List of conditions to include in the policy
-    :param expiration: Time in seconds for the presigned URL to remain valid
-    :return: Dictionary with the following keys:
-        url: URL to post to
-        fields: Dictionary of form fields and values to submit with the POST
-    :return: None if error.
-    """
-
-    # Generate a presigned S3 POST URL
-    s3_client = boto3.client('s3')
-    try:
-        response = s3_client.generate_presigned_post(bucket_name,
-                                                     object_name,
-                                                     Fields=fields,
-                                                     Conditions=conditions,
-                                                     ExpiresIn=expiration)
-    except ClientError as e:
-        logging.error(e)
-        return None
-
-    # The response contains the presigned URL and required fields
-    return response
-
-
-def lambda_handler(event, context):
+def create(event, context):
 
     regex = re.compile(
         r'^(?:http|ftp)s?://'  # http:// or https://
@@ -48,54 +19,61 @@ def lambda_handler(event, context):
         r'(?::\d+)?'  # optional port
         r'(?:/?|[/?]\S+)$', re.IGNORECASE)
 
-    callback_url = event['callback_url']
+    data = json.loads(event['body'])
+    callback_url = data['callback_url']
+
     if re.match(regex, callback_url) is None:
         return {
             'statusCode': 400,
-            'body': json.dumps('Invalid callback url supplied')
+            'body': json.dumps('Invalid callback url')
         }
 
-    # Instanciating connection objects with DynamoDB using boto3 dependency
-    dynamodb = boto3.resource('dynamodb')
-    client = boto3.client('dynamodb')
+    # Getting the table object
+    table_blobs = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
 
-    # Getting the table Blobs object
-    table_blobs = dynamodb.Table('Blobs')
+    s3_client = boto3.client('s3')
 
     # Getting the current datetime and transforming it to string in the format bellow
     event_date_time = (datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
-    blob_id = uuid4()
+    blob_id = uuid1()
 
-    # Putting a try/catch to log to user when some error occurs
     try:
-        # TODO what object_name should be set?
-        object_name = 'OBJECT_NAME'
-        # TODO how to set bucket name?
-        response = create_presigned_post('BUCKET_NAME', object_name)
-        if response is None:
-            return {
-                'statusCode': 400,
-                'body': json.dumps('Error generating upload url')
-            }
+        presigned_url = s3_client.generate_presigned_url(
+            ClientMethod='put_object',
+            Params={
+                'Bucket': os.environ['S3_BLOB_BUCKET'],
+                'Key': str(blob_id)
+            })
+
+    except ClientError as e:
+        print(e)
+        print('Closing lambda function')
+        return {
+            'statusCode': 400,
+            'body': json.dumps('Error generating upload url')
+        }
+
+    try:
 
         table_blobs.put_item(
             Item={
-                'event_date_time': event_date_time,
+                'blob_id': str(blob_id),
                 'callback_url': callback_url,
-                'blob_id': blob_id
+                'event_date_time': event_date_time
             }
         )
 
         return {
-            'statusCode': 200,
-            'body': {
-                'blob_id': blob_id,
+            'statusCode': 201,
+            'body': json.dumps({
+                'blob_id': str(blob_id),
                 'callback_url': callback_url,
-                # TODO should we add 'fields' as well?
-                'upload_url': response['url']
-            }
+                'upload_url': presigned_url
+            },
+                default=str)
         }
-    except:
+    except Exception as e:
+        print(e)
         print('Closing lambda function')
         return {
             'statusCode': 400,

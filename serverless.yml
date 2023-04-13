@@ -1,0 +1,99 @@
+service: image-rekognition-service
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.9
+  region: us-east-1
+  stage: dev
+  environment:
+    S3_BLOB_BUCKET: ${self:service}-${opt:stage, self:provider.stage}
+    DYNAMODB_TABLE: ${self:service}-${opt:stage, self:provider.stage}
+    REGION_NAME: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: 'Allow'
+          Action:
+            - 'dynamodb:PutItem'
+            - 'dynamodb:Get*'
+            - 'dynamodb:Scan*'
+            - 'dynamodb:UpdateItem'
+            - 'dynamodb:DeleteItem'
+          Resource: "arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.DYNAMODB_TABLE}"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+          Resource:
+            - 'arn:aws:s3:::${self:provider.environment.S3_BLOB_BUCKET}/*'
+        - Effect: "Allow"
+          Action:
+            - "rekognition:*"
+          Resource: "*"
+
+functions:
+  createBlob:
+    handler: blobs/createBlob.create
+    description: Create blob
+    events:
+      - http:
+          path: blobs
+          method: post
+          cors: true
+
+  getBlob:
+    handler: blobs/getBlob.get
+    description: Get blob info
+    events:
+      - http:
+          path: blobs/{id}
+          method: get
+          cors: true
+          request:
+            parameters:
+              paths:
+                id: true
+
+  processBlob:
+    handler: blobs/processBlob.process
+    events:
+      - s3:
+          bucket: ${self:provider.environment.S3_BLOB_BUCKET}
+          event: s3:ObjectCreated:*
+
+  makeCallback:
+    handler: blobs/makeCallback.make_callback
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt:
+              - BlobTable
+              - StreamArn
+          batchSize: 1
+          filterPatterns:
+            - eventName: [MODIFY]
+
+
+resources:
+  Resources:
+    BlobTable:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      Properties:
+        AttributeDefinitions:
+          -
+            AttributeName: blob_id
+            AttributeType: S
+        KeySchema:
+          -
+            AttributeName: blob_id
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+        TableName: ${self:provider.environment.DYNAMODB_TABLE}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES

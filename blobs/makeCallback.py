@@ -1,29 +1,39 @@
+import urllib3
 import json
-import boto3
-import requests
 
 
-def lambda_handler(event, context):
+def make_callback(event, context):
     for record in event['Records']:
         # extract the necessary info from the DynamoDB stream record
-        if record['eventName'] == 'MODIFY':
-            new_image = record['dynamodb']['NewImage']
-            old_image = record['dynamodb']['OldImage']
+        try:
+            if record['eventName'] == 'MODIFY':
+                new_image = record['dynamodb']['NewImage']
 
-            new_labels = new_image['labels']
-            old_labels = old_image['labels']
+                callback_url = new_image['callback_url']['S']
+                labels = new_image['labels']['S']
 
-            if new_labels == old_labels:
-                return "The labels have not been changed"
+                item = {
+                    'blob_id': new_image['blob_id']['S'],
+                    'callback_url': callback_url,
+                    'labels': json.loads(labels)
+                }
 
-            callback_url = new_image['callback_url']
+                http = urllib3.PoolManager()
 
-            # send a POST request to the callback URL with the message as the payload
-            headers = {'Content-type': 'application/json'}
-            response = requests.post(callback_url, data=new_labels, headers=headers)
+                # send a POST request to the callback URL with the blob as the payload
+                response = http.request(
+                    'POST',
+                    callback_url,
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps(item).encode('utf-8'))
 
-            # check the response status code and raise an error if necessary
-            if response.status_code != 200:
-                raise ValueError(f"Failed to send message to callback URL. Response status code: {response.status_code}")
+                # check the response status code and raise an error if necessary
+                if response.status != 200:
+                    raise ValueError('Failed to send message to callback URL')
+        except Exception as e:
+            print(e)
+            print('Closing lambda function')
+            raise e
 
-    return "Successfully sent message to callback URL."
+    print('Successfully sent message to callback URL')
+    return
